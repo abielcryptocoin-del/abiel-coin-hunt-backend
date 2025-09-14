@@ -1,0 +1,10 @@
+{
+  "name": "abiel-coin-hunt-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.46.1",
+    "resend": "^3.3.0"
+  }
+}
