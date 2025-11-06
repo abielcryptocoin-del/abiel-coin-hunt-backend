@@ -13,7 +13,7 @@ import {
 } from "@solana/spl-token";
 import { createClient } from "@supabase/supabase-js";
 
-console.log("🚀 airdrop-handler v3.6 — logging + duplicate protection");
+console.log("🚀 airdrop-handler v3.8 — live sale fix + logging + duplicate protection");
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
@@ -28,8 +28,8 @@ const supabase = createClient(
 // === CONFIG ===
 const ABC_MINT = new PublicKey("7YESrv9LkAhAQH2kkvbDGjmgnJ94FTFapDQqR6YWUtFc");
 
-// Treasury receives SOL
-const PRESALE_COLLECTION_WALLET = new PublicKey("GdguGxvuYJQuMkNWswLATrqryW6LtRTyohFtBQBaTHMKpQBg9K");
+// Treasury receives SOL/USDC
+const PRESALE_COLLECTION_WALLET = new PublicKey("GdguGxvuYJQuMkNWswLATrqryW6PqwerwwEUYFmXmi67");
 // Presale wallet sends ABC
 const AIRDROP_SOURCE_WALLET = new PublicKey("GLbyyEP5AWMnVUvVikhH6LtRTyohFtBQBaTHMKpQBg9K");
 
@@ -39,7 +39,7 @@ const AIRDROP_KEYPAIR = Keypair.fromSecretKey(Uint8Array.from(secret));
 
 // === SETTINGS ===
 const ABC_RATE = 700;      // 1 SOL = 700 ABC
-const TOKEN_DECIMALS = 6;  // ABC has 6 decimals
+const TOKEN_DECIMALS = 6;  // ABC decimals
 
 // === MAIN HANDLER ===
 export default async function handler(req, res) {
@@ -47,9 +47,20 @@ export default async function handler(req, res) {
     return res.status(405).json({ message: "Only POST allowed" });
 
   try {
-    console.log("🎯 Webhook event received:", JSON.stringify(req.body, null, 2));
     const event = req.body[0];
     if (!event) return res.status(400).json({ error: "Invalid webhook payload" });
+
+    // 🧱 Early exit for irrelevant or malformed events
+    if (event.type !== "TRANSFER") {
+      console.log(`ℹ️ Ignored non-transfer event type: ${event.type}`);
+      return res.status(200).json({ ignored: event.type });
+    }
+
+    if ((!event.nativeTransfers || event.nativeTransfers.length === 0) &&
+        (!event.tokenTransfers || event.tokenTransfers.length === 0)) {
+      console.log("ℹ️ Ignored event with no transfers");
+      return res.status(200).json({ ignored: "no_transfers" });
+    }
 
     const txSignature = event.signature;
     const nativeTransfers = event.nativeTransfers || [];
@@ -58,32 +69,50 @@ export default async function handler(req, res) {
     let buyer = null;
     let amount = 0;
 
-    // Detect SOL transfer
+    // === Detect SOL transfer (supports all key formats) ===
     const solTx = nativeTransfers.find(
-      (t) => t.toUserAccount === PRESALE_COLLECTION_WALLET.toString()
+      (t) =>
+        t.toUserAccount === PRESALE_COLLECTION_WALLET.toString() ||
+        t.toAccount === PRESALE_COLLECTION_WALLET.toString()
     );
     if (solTx) {
-      buyer = solTx.fromUserAccount;
+      buyer =
+        solTx.fromUserAccount ||
+        solTx.fromAccount ||
+        solTx.source ||
+        null;
       amount = solTx.amount / 1e9; // lamports → SOL
     }
 
-    // Detect USDC transfer (optional)
+    // === Detect USDC (token) transfer ===
     const usdcTx = tokenTransfers.find(
-      (t) => t.toUserAccount === PRESALE_COLLECTION_WALLET.toString()
+      (t) =>
+        t.toUserAccount === PRESALE_COLLECTION_WALLET.toString() ||
+        t.toAccount === PRESALE_COLLECTION_WALLET.toString()
     );
     if (usdcTx) {
-      buyer = usdcTx.fromUserAccount;
+      buyer =
+        usdcTx.fromUserAccount ||
+        usdcTx.fromAccount ||
+        usdcTx.source ||
+        null;
       amount = usdcTx.tokenAmount / 1e6;
     }
 
-    if (!buyer || amount <= 0) {
-      console.log("⚠️ No valid incoming payment, skipping.");
-      return res.status(200).json({ ignored: true });
+    // Guard against invalid buyer or amount
+    if (!buyer || typeof buyer !== "string" || buyer.length < 32) {
+      console.log("⚠️ Invalid or missing buyer address — skipping.");
+      return res.status(200).json({ ignored: "invalid_buyer" });
+    }
+
+    if (amount <= 0) {
+      console.log("⚠️ No valid transfer amount, skipping.");
+      return res.status(200).json({ ignored: "zero_amount" });
     }
 
     console.log(`💰 Buyer ${buyer} paid ${amount} (SOL/USDC)`);
 
-    // 🔍 1️⃣ Check for duplicates
+    // 🔍 1️⃣ Check for duplicates in Supabase
     const { data: existing, error: checkError } = await supabase
       .from("presale_logs")
       .select("tx_signature")
@@ -101,7 +130,7 @@ export default async function handler(req, res) {
     const abcToSend = Math.floor(amount * ABC_RATE * 10 ** TOKEN_DECIMALS);
     console.log(`🎁 Sending ${abcToSend / 10 ** TOKEN_DECIMALS} ABC to ${buyer}`);
 
-    // 3️⃣ Prepare accounts
+    // 3️⃣ Prepare token accounts
     const buyerPubkey = new PublicKey(buyer);
     const fromATA = await getAssociatedTokenAddress(ABC_MINT, AIRDROP_SOURCE_WALLET);
     const toATAAccount = await getOrCreateAssociatedTokenAccount(
