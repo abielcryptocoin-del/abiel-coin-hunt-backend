@@ -13,7 +13,7 @@ import {
 } from "@solana/spl-token";
 import { createClient } from "@supabase/supabase-js";
 
-console.log("🚀 airdrop-handler v3.8 — live sale fix + logging + duplicate protection");
+console.log("🚀 airdrop-handler v3.9 — USDC rate logic + full protections");
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
@@ -38,8 +38,24 @@ const secret = JSON.parse(process.env.AIRDROP_SECRET_KEY);
 const AIRDROP_KEYPAIR = Keypair.fromSecretKey(Uint8Array.from(secret));
 
 // === SETTINGS ===
-const ABC_RATE = 700;      // 1 SOL = 700 ABC
-const TOKEN_DECIMALS = 6;  // ABC decimals
+const ABC_RATE_USDC = 700;     // 1 USDC = 700 ABC
+const TOKEN_DECIMALS = 6;
+
+// === Helper: get current SOL→USD rate ===
+async function getSolPriceUSD() {
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
+    );
+    const data = await res.json();
+    const price = data.solana?.usd || 0;
+    console.log(`💲 Current SOL/USD: ${price}`);
+    return price;
+  } catch (e) {
+    console.error("⚠️ Failed to fetch SOL price:", e);
+    return 0;
+  }
+}
 
 // === MAIN HANDLER ===
 export default async function handler(req, res) {
@@ -50,12 +66,11 @@ export default async function handler(req, res) {
     const event = req.body[0];
     if (!event) return res.status(400).json({ error: "Invalid webhook payload" });
 
-    // 🧱 Early exit for irrelevant or malformed events
+    // Ignore irrelevant events
     if (event.type !== "TRANSFER") {
       console.log(`ℹ️ Ignored non-transfer event type: ${event.type}`);
       return res.status(200).json({ ignored: event.type });
     }
-
     if ((!event.nativeTransfers || event.nativeTransfers.length === 0) &&
         (!event.tokenTransfers || event.tokenTransfers.length === 0)) {
       console.log("ℹ️ Ignored event with no transfers");
@@ -68,8 +83,9 @@ export default async function handler(req, res) {
 
     let buyer = null;
     let amount = 0;
+    let abcToSend = 0;
 
-    // === Detect SOL transfer (supports all key formats) ===
+    // === Detect SOL transfer ===
     const solTx = nativeTransfers.find(
       (t) =>
         t.toUserAccount === PRESALE_COLLECTION_WALLET.toString() ||
@@ -82,9 +98,16 @@ export default async function handler(req, res) {
         solTx.source ||
         null;
       amount = solTx.amount / 1e9; // lamports → SOL
+      const solPriceUSD = await getSolPriceUSD();
+      if (solPriceUSD > 0) {
+        abcToSend = Math.floor(amount * solPriceUSD * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
+      } else {
+        console.log("⚠️ Could not fetch SOL price, skipping.");
+        return res.status(200).json({ ignored: "price_fetch_failed" });
+      }
     }
 
-    // === Detect USDC (token) transfer ===
+    // === Detect USDC transfer ===
     const usdcTx = tokenTransfers.find(
       (t) =>
         t.toUserAccount === PRESALE_COLLECTION_WALLET.toString() ||
@@ -96,41 +119,36 @@ export default async function handler(req, res) {
         usdcTx.fromAccount ||
         usdcTx.source ||
         null;
-      amount = usdcTx.tokenAmount / 1e6;
+      amount = usdcTx.tokenAmount / 1e6; // USDC decimals
+      abcToSend = Math.floor(amount * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
     }
 
-    // Guard against invalid buyer or amount
     if (!buyer || typeof buyer !== "string" || buyer.length < 32) {
       console.log("⚠️ Invalid or missing buyer address — skipping.");
       return res.status(200).json({ ignored: "invalid_buyer" });
     }
-
-    if (amount <= 0) {
-      console.log("⚠️ No valid transfer amount, skipping.");
+    if (abcToSend <= 0) {
+      console.log("⚠️ No valid ABC amount calculated, skipping.");
       return res.status(200).json({ ignored: "zero_amount" });
     }
 
     console.log(`💰 Buyer ${buyer} paid ${amount} (SOL/USDC)`);
+    console.log(`🎁 Sending ${abcToSend / 10 ** TOKEN_DECIMALS} ABC`);
 
-    // 🔍 1️⃣ Check for duplicates in Supabase
+    // === Duplicate protection ===
     const { data: existing, error: checkError } = await supabase
       .from("presale_logs")
       .select("tx_signature")
       .eq("tx_signature", txSignature)
       .maybeSingle();
 
-    if (checkError) {
-      console.error("⚠️ Supabase check error:", checkError.message);
-    } else if (existing) {
+    if (checkError) console.error("⚠️ Supabase check error:", checkError.message);
+    if (existing) {
       console.log("⚠️ Duplicate transaction detected — skipping airdrop.");
       return res.status(200).json({ ignored: "duplicate" });
     }
 
-    // 2️⃣ Calculate ABC to send
-    const abcToSend = Math.floor(amount * ABC_RATE * 10 ** TOKEN_DECIMALS);
-    console.log(`🎁 Sending ${abcToSend / 10 ** TOKEN_DECIMALS} ABC to ${buyer}`);
-
-    // 3️⃣ Prepare token accounts
+    // === Transfer ===
     const buyerPubkey = new PublicKey(buyer);
     const fromATA = await getAssociatedTokenAddress(ABC_MINT, AIRDROP_SOURCE_WALLET);
     const toATAAccount = await getOrCreateAssociatedTokenAccount(
@@ -141,14 +159,12 @@ export default async function handler(req, res) {
     );
     const toATA = toATAAccount.address;
 
-    // 4️⃣ Create and send transfer
     const ix = createTransferInstruction(fromATA, toATA, AIRDROP_SOURCE_WALLET, abcToSend);
     const tx = new Transaction().add(ix);
     const sig = await sendAndConfirmTransaction(connection, tx, [AIRDROP_KEYPAIR]);
-
     console.log(`✅ Airdrop successful: https://solscan.io/tx/${sig}`);
 
-    // 5️⃣ Log the sale in Supabase
+    // === Log to Supabase ===
     const { error: dbError } = await supabase.from("presale_logs").insert([
       {
         buyer,
@@ -157,12 +173,8 @@ export default async function handler(req, res) {
         tx_signature: txSignature || sig
       }
     ]);
-
-    if (dbError) {
-      console.error("⚠️ Failed to log to Supabase:", dbError.message);
-    } else {
-      console.log("🧾 Sale logged in Supabase");
-    }
+    if (dbError) console.error("⚠️ Failed to log to Supabase:", dbError.message);
+    else console.log("🧾 Sale logged in Supabase");
 
     console.log("✅ VERIFIED LIVE BUILD — ABC transfer executed");
     return res.status(200).json({ success: true, tx: sig });
