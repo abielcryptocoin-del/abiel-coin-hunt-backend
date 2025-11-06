@@ -144,8 +144,14 @@ export default async function handler(req, res) {
 
     const ix = createTransferInstruction(fromATA, toATA, AIRDROP_SOURCE_WALLET, abcToSend);
     const tx = new Transaction().add(ix);
+    
+    // 🪙 Explicitly set fee payer and blockhash
+    tx.feePayer = AIRDROP_SOURCE_WALLET;
+    tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+    
+    // ✅ Sign and send with the presale wallet keypair
     const sig = await sendAndConfirmTransaction(connection, tx, [AIRDROP_KEYPAIR]);
-
+    
     console.log(`✅ Airdrop sent: https://solscan.io/tx/${sig}`);
 
     // === Log in Supabase ===
