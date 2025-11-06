@@ -1,8 +1,9 @@
 // /api/airdrop-handler.js
-import { Connection, PublicKey, Keypair, Transaction } from "@solana/web3.js";
+import { Connection, PublicKey, Transaction, Keypair } from "@solana/web3.js";
 import {
-  getAssociatedTokenAddress,
   createTransferInstruction,
+  getAssociatedTokenAddress,
+  TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 
 // === CONFIG ===
@@ -10,83 +11,72 @@ const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const connection = new Connection(RPC_URL, "confirmed");
 
-// Replace with your actual ABC mint address
-const ABC_MINT = new PublicKey("YOUR_ABC_MINT_ADDRESS");
-const PRESALE_WALLET = new PublicKey(
-  "GLbyyEP5AWMnVUvVikhH6LtRTyohFtBQBaTHMKpQBg9K"
-);
+const ABC_MINT = new PublicKey("7YESrv9LkAhAQH2kkvbDGjmgnJ94FTFapDQqR6YWUtFc");
+const PRESALE_WALLET = new PublicKey("GLbyyEP5AWMnVUvVikhH6LtRTyohFtBQBaTHMKpQBg9K");
 
-// Load presale wallet private key from environment (base58 JSON array)
+// Load presale wallet secret key (from Vercel Environment Variables)
 const secret = JSON.parse(process.env.PRESALE_SECRET_KEY);
 const PRESALE_KEYPAIR = Keypair.fromSecretKey(Uint8Array.from(secret));
 
-const ABC_RATE = 700; // adjust dynamically if needed
+// === RATE LOGIC ===
+const ABC_RATE = 700; // 1 USDC = 700 ABC
 
 export default async function handler(req, res) {
-  if (req.method !== "POST")
-    return res.status(405).json({ message: "Only POST allowed" });
+  if (req.method !== "POST") return res.status(405).send("Method not allowed");
+
+  const event = req.body;
+  console.log("🎯 Webhook event received:", JSON.stringify(event, null, 2));
 
   try {
-    const body = req.body;
-    console.log("🎯 Helius event received:", JSON.stringify(body, null, 2));
-
-    // --- Extract buyer + amount ---
-    const tx = body[0];
-    if (!tx || !tx.description?.includes("Transfer")) {
-      return res.status(200).json({ message: "No valid transfer event" });
-    }
-
-    // Example: detect SOL or USDC sent to your presale wallet
-    const accountData = tx.accountData || [];
-    const presaleAcc = PRESALE_WALLET.toString();
-
-    const incoming = accountData.find(
-      (a) => a.owner === presaleAcc || a.account === presaleAcc
-    );
-    if (!incoming) {
-      return res.status(200).json({ message: "Not for presale wallet" });
-    }
-
-    const buyerAddress = tx.source || tx.feePayer;
-    if (!buyerAddress) {
-      return res.status(200).json({ message: "No buyer detected" });
-    }
-
-    // amount in SOL or USDC — placeholder (you’ll adapt later)
-    const amountPaid = tx.amount || 1; // fallback 1 USDC
-
-    // --- Calculate airdrop ---
-    const airdropAmount = amountPaid * ABC_RATE * 1e6; // assuming 6 decimals
-
-    console.log(
-      `💸 Detected presale from ${buyerAddress}, sending ${airdropAmount /
-        1e6} ABC`
+    // Extract and verify target wallet
+    const instructions = event[0]?.instructions || [];
+    const transferIx = instructions.find(ix =>
+      ix.parsed?.info?.destination === PRESALE_WALLET.toString()
     );
 
-    // --- SPL Transfer ---
-    const buyer = new PublicKey(buyerAddress);
-    const fromATA = await getAssociatedTokenAddress(ABC_MINT, PRESALE_WALLET);
-    const toATA = await getAssociatedTokenAddress(ABC_MINT, buyer);
+    if (!transferIx) {
+      console.log("❌ No transfer to presale wallet detected.");
+      return res.status(200).send("Not for presale wallet");
+    }
+
+    const buyerAddress = transferIx.parsed?.info?.source;
+    const amount = Number(transferIx.parsed?.info?.lamports || 0) / 1e9; // SOL
+
+    if (!buyerAddress || amount <= 0) {
+      console.log("⚠️ Invalid or missing buyer info.");
+      return res.status(200).send("Invalid transaction");
+    }
+
+    // Calculate ABC airdrop amount
+    const abcAmount = Math.floor(amount * ABC_RATE * 1e6); // 6 decimals
+    console.log(`💰 Airdropping ${abcAmount / 1e6} ABC to ${buyerAddress}`);
+
+    const buyerPubkey = new PublicKey(buyerAddress);
+    const fromATA = await getAssociatedTokenAddress(
+      ABC_MINT,
+      PRESALE_WALLET,
+      true
+    );
+    const toATA = await getAssociatedTokenAddress(ABC_MINT, buyerPubkey, true);
 
     const ix = createTransferInstruction(
       fromATA,
       toATA,
       PRESALE_WALLET,
-      airdropAmount
+      abcAmount,
+      [],
+      TOKEN_PROGRAM_ID
     );
 
-    const txAirdrop = new Transaction().add(ix);
-    txAirdrop.feePayer = PRESALE_WALLET.publicKey;
-    txAirdrop.recentBlockhash = (
-      await connection.getLatestBlockhash()
-    ).blockhash;
+    const tx = new Transaction().add(ix);
+    tx.feePayer = PRESALE_WALLET;
+    tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
 
-    const sig = await connection.sendTransaction(txAirdrop, [PRESALE_KEYPAIR]);
-    console.log("✅ Airdrop sent! Signature:", sig);
-
-    return res.status(200).json({ success: true, signature: sig });
+    const sig = await connection.sendTransaction(tx, [PRESALE_KEYPAIR]);
+    console.log(`✅ Airdrop sent! https://solscan.io/tx/${sig}`);
+    return res.status(200).json({ success: true, sig });
   } catch (err) {
-    console.error("❌ Handler error:", err);
+    console.error("❌ Airdrop failed:", err);
     return res.status(500).json({ error: err.message });
   }
 }
