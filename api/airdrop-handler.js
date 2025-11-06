@@ -95,6 +95,7 @@ export default async function handler(req, res) {
       buyer =
         solTx.fromUserAccount ||
         solTx.fromAccount ||
+        solTx.fromUser ||
         solTx.source ||
         null;
       amount = solTx.amount / 1e9; // lamports → SOL
@@ -117,12 +118,15 @@ export default async function handler(req, res) {
       buyer =
         usdcTx.fromUserAccount ||
         usdcTx.fromAccount ||
+        usdcTx.fromUser ||
         usdcTx.source ||
         null;
       amount = usdcTx.tokenAmount / 1e6; // USDC decimals
       abcToSend = Math.floor(amount * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
     }
 
+    console.log("🧩 Debug transfer object:", JSON.stringify({ solTx, tokenTransfers }, null, 2));
+    
     if (!buyer || typeof buyer !== "string" || buyer.length < 32) {
       console.log("⚠️ Invalid or missing buyer address — skipping.");
       return res.status(200).json({ ignored: "invalid_buyer" });
