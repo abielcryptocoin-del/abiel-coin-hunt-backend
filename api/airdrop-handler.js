@@ -12,6 +12,8 @@ import {
   createTransferInstruction
 } from "@solana/spl-token";
 
+console.log("🚀 Running UPDATED airdrop-handler v3.1");
+
 // === CONFIG ===
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
