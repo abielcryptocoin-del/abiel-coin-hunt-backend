@@ -13,7 +13,7 @@ import {
 } from "@solana/spl-token";
 import { createClient } from "@supabase/supabase-js";
 
-console.log("🚀 airdrop-handler v3.9 — USDC rate logic + full protections");
+console.log("🚀 airdrop-handler v4.0 — enhanced detection + debug");
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
@@ -38,7 +38,7 @@ const secret = JSON.parse(process.env.AIRDROP_SECRET_KEY);
 const AIRDROP_KEYPAIR = Keypair.fromSecretKey(Uint8Array.from(secret));
 
 // === SETTINGS ===
-const ABC_RATE_USDC = 700;     // 1 USDC = 700 ABC
+const ABC_RATE_USDC = 700; // 1 USDC = 700 ABC
 const TOKEN_DECIMALS = 6;
 
 // === Helper: get current SOL→USD rate ===
@@ -71,8 +71,10 @@ export default async function handler(req, res) {
       console.log(`ℹ️ Ignored non-transfer event type: ${event.type}`);
       return res.status(200).json({ ignored: event.type });
     }
-    if ((!event.nativeTransfers || event.nativeTransfers.length === 0) &&
-        (!event.tokenTransfers || event.tokenTransfers.length === 0)) {
+    if (
+      (!event.nativeTransfers || event.nativeTransfers.length === 0) &&
+      (!event.tokenTransfers || event.tokenTransfers.length === 0)
+    ) {
       console.log("ℹ️ Ignored event with no transfers");
       return res.status(200).json({ ignored: "no_transfers" });
     }
@@ -86,26 +88,37 @@ export default async function handler(req, res) {
     let abcToSend = 0;
 
     // === Detect SOL transfer ===
+    console.log("📦 Native transfers:", JSON.stringify(nativeTransfers, null, 2));
+
     const solTx = nativeTransfers.find(
       (t) =>
         t.toUserAccount === PRESALE_COLLECTION_WALLET.toString() ||
-        t.toAccount === PRESALE_COLLECTION_WALLET.toString()
+        t.toAccount === PRESALE_COLLECTION_WALLET.toString() ||
+        t.toUser === PRESALE_COLLECTION_WALLET.toString() ||
+        t.to === PRESALE_COLLECTION_WALLET.toString() ||
+        t.destination === PRESALE_COLLECTION_WALLET.toString()
     );
+
     if (solTx) {
       buyer =
         solTx.fromUserAccount ||
         solTx.fromAccount ||
         solTx.fromUser ||
+        solTx.from ||
         solTx.source ||
         null;
       amount = solTx.amount / 1e9; // lamports → SOL
       const solPriceUSD = await getSolPriceUSD();
       if (solPriceUSD > 0) {
-        abcToSend = Math.floor(amount * solPriceUSD * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
+        abcToSend = Math.floor(
+          amount * solPriceUSD * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS
+        );
       } else {
         console.log("⚠️ Could not fetch SOL price, skipping.");
         return res.status(200).json({ ignored: "price_fetch_failed" });
       }
+    } else {
+      console.log("⚠️ No matching SOL transfer found for", PRESALE_COLLECTION_WALLET.toString());
     }
 
     // === Detect USDC transfer ===
@@ -126,7 +139,7 @@ export default async function handler(req, res) {
     }
 
     console.log("🧩 Debug transfer object:", JSON.stringify({ solTx, tokenTransfers }, null, 2));
-    
+
     if (!buyer || typeof buyer !== "string" || buyer.length < 32) {
       console.log("⚠️ Invalid or missing buyer address — skipping.");
       return res.status(200).json({ ignored: "invalid_buyer" });
