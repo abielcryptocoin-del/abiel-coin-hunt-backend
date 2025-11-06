@@ -12,6 +12,14 @@ import {
   createTransferInstruction
 } from "@solana/spl-token";
 
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+
 console.log("🚀 airdrop-handler v3.5 — LIVE BUILD ENABLED");
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
@@ -103,6 +111,28 @@ export default async function handler(req, res) {
     console.log("✅ VERIFIED LIVE BUILD — ABC transfer executed");
 
     return res.status(200).json({ success: true, tx: sig });
+
+    // 7️⃣ Log the sale in Supabase
+    try {
+      const { error: dbError } = await supabase.from("presale_logs").insert([
+        {
+          buyer,
+          sol_amount: amount,
+          abc_amount: abcToSend / 10 ** TOKEN_DECIMALS,
+          tx_signature: sig
+        }
+      ]);
+    
+      if (dbError) {
+        console.error("⚠️ Failed to log to Supabase:", dbError.message);
+      } else {
+        console.log("🧾 Sale logged in Supabase");
+      }
+    } catch (logErr) {
+      console.error("⚠️ Logging exception:", logErr);
+    }
+
+    
   } catch (err) {
     console.error("❌ Airdrop error:", err);
     return res.status(500).json({ error: err.message });
