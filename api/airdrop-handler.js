@@ -1,170 +1,86 @@
 // /api/airdrop-handler.js
-import {
-  Connection,
-  PublicKey,
-  Transaction,
-  Keypair,
-  sendAndConfirmTransaction
-} from "@solana/web3.js";
+import { Connection, PublicKey, Transaction, Keypair } from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
-  getOrCreateAssociatedTokenAccount,
-  createTransferInstruction
+  createTransferInstruction,
 } from "@solana/spl-token";
-import { createClient } from "@supabase/supabase-js";
 
-console.log("🚀 airdrop-handler v4.4 — restored working logic + Supabase logging");
+console.log("🚀 airdrop-handler — stable working build");
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const connection = new Connection(RPC_URL, "confirmed");
 
-// === SUPABASE ===
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
 // === CONFIG ===
 const ABC_MINT = new PublicKey("7YESrv9LkAhAQH2kkvbDGjmgnJ94FTFapDQqR6YWUtFc");
+const PRESALE_COLLECTION_WALLET = new PublicKey("GLbyyEP5AWMnVUvVikhH6LtRTyohFtBQBaTHMKpQBg9K"); // where SOL/USDC is received
+const AIRDROP_SOURCE_WALLET = new PublicKey("GdguGxvuYJQuMkNWswLATrqryW6PqwerwwEUYFmXmi67"); // wallet that holds ABC
 
-// Treasury (receiver)
-const PRESALE_COLLECTION_WALLET = new PublicKey("GdguGxvuYJQuMkNWswLATrqryW6PqwerwwEUYFmXmi67");
-// Presale wallet (sends ABC)
-const AIRDROP_SOURCE_WALLET = new PublicKey("GLbyyEP5AWMnVUvVikhH6LtRTyohFtBQBaTHMKpQBg9K");
-
-// Private key for presale wallet
+// Load the private key for the wallet that will SEND the ABC
 const secret = JSON.parse(process.env.AIRDROP_SECRET_KEY);
 const AIRDROP_KEYPAIR = Keypair.fromSecretKey(Uint8Array.from(secret));
 
 // === SETTINGS ===
-const ABC_RATE_USDC = 700; // 1 USDC = 700 ABC
+const ABC_RATE = 700; // 1 USDC = 700 ABC
 const TOKEN_DECIMALS = 6;
-
-// === Helper: fetch current SOL→USD price ===
-async function getSolPriceUSD() {
-  try {
-    const res = await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
-    );
-    const data = await res.json();
-    const price = data.solana?.usd || 0;
-    console.log(`💲 Current SOL/USD price: ${price}`);
-    return price;
-  } catch (e) {
-    console.error("⚠️ Failed to fetch SOL price:", e);
-    return 0;
-  }
-}
 
 // === MAIN HANDLER ===
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
+  if (req.method !== "POST")
     return res.status(405).json({ message: "Only POST allowed" });
-  }
 
   try {
+    console.log("🎯 Webhook event received:", JSON.stringify(req.body, null, 2));
     const event = req.body[0];
-    if (!event) return res.status(400).json({ error: "Invalid webhook payload" });
 
-    console.log("🎯 Webhook event received:", event.description || "No description");
-    console.log("🧠 Full nativeTransfers:", JSON.stringify(event.nativeTransfers || [], null, 2));
-
-    const txSignature = event.signature;
     const nativeTransfers = event.nativeTransfers || [];
     const tokenTransfers = event.tokenTransfers || [];
 
     let buyer = null;
     let amount = 0;
-    let abcToSend = 0;
 
-    // === Simple SOL detection (restored behaviour) ===
-    const solTx = nativeTransfers[0];
+    // === Detect SOL payment ===
+    const solTx = nativeTransfers.find(
+      (t) => t.toUserAccount === PRESALE_COLLECTION_WALLET.toString()
+    );
     if (solTx) {
-      buyer =
-        solTx.fromUserAccount ||
-        solTx.fromAccount ||
-        solTx.source ||
-        solTx.fromUser ||
-        null;
+      buyer = solTx.fromUserAccount;
       amount = solTx.amount / 1e9; // lamports → SOL
-
-      const solPriceUSD = await getSolPriceUSD();
-      abcToSend = Math.floor(amount * solPriceUSD * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
     }
 
-    // === USDC transfer fallback ===
-    if (!solTx && tokenTransfers.length > 0) {
-      const usdcTx = tokenTransfers[0];
-      buyer =
-        usdcTx.fromUserAccount ||
-        usdcTx.fromAccount ||
-        usdcTx.source ||
-        null;
-      amount = usdcTx.tokenAmount / 1e6;
-      abcToSend = Math.floor(amount * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
+    // === Detect USDC payment ===
+    const usdcTx = tokenTransfers.find(
+      (t) => t.toUserAccount === PRESALE_COLLECTION_WALLET.toString()
+    );
+    if (usdcTx) {
+      buyer = usdcTx.fromUserAccount;
+      amount = usdcTx.tokenAmount / 1e6; // USDC decimals
     }
 
-    // === Final validation ===
-    if (!buyer || buyer.length < 32) {
-      console.log("⚠️ No valid buyer detected — skipping.");
-      return res.status(200).json({ ignored: "invalid_buyer" });
-    }
-    if (abcToSend <= 0) {
-      console.log("⚠️ ABC amount zero — skipping.");
-      return res.status(200).json({ ignored: "zero_amount" });
+    if (!buyer || amount <= 0) {
+      console.log("⚠️ No valid buyer or amount, skipping.");
+      return res.status(200).json({ ignored: true });
     }
 
-    console.log(`💰 Buyer ${buyer} paid ${amount}`);
+    console.log(`💰 Buyer ${buyer} paid ${amount} (SOL/USDC)`);
+
+    // === Calculate ABC to send ===
+    const abcToSend = Math.floor(amount * ABC_RATE * 10 ** TOKEN_DECIMALS);
     console.log(`🎁 Sending ${abcToSend / 10 ** TOKEN_DECIMALS} ABC`);
 
-    // === Duplicate protection (Supabase) ===
-    const { data: existing, error: checkError } = await supabase
-      .from("presale_logs")
-      .select("tx_signature")
-      .eq("tx_signature", txSignature)
-      .maybeSingle();
-
-    if (checkError) console.error("⚠️ Supabase duplicate-check error:", checkError.message);
-    if (existing) {
-      console.log("⚠️ Duplicate transaction — skipping airdrop.");
-      return res.status(200).json({ ignored: "duplicate" });
-    }
-
-    // === Execute ABC transfer ===
+    // === Prepare transfer ===
     const buyerPubkey = new PublicKey(buyer);
     const fromATA = await getAssociatedTokenAddress(ABC_MINT, AIRDROP_SOURCE_WALLET);
-    const toATAAccount = await getOrCreateAssociatedTokenAccount(
-      connection,
-      AIRDROP_KEYPAIR,
-      ABC_MINT,
-      buyerPubkey
-    );
-    const toATA = toATAAccount.address;
+    const toATA = await getAssociatedTokenAddress(ABC_MINT, buyerPubkey);
 
     const ix = createTransferInstruction(fromATA, toATA, AIRDROP_SOURCE_WALLET, abcToSend);
     const tx = new Transaction().add(ix);
-    
-    // 🪙 Explicitly set fee payer and blockhash
     tx.feePayer = AIRDROP_SOURCE_WALLET;
     tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-    
-    // ✅ Sign and send with the presale wallet keypair
-    const sig = await sendAndConfirmTransaction(connection, tx, [AIRDROP_KEYPAIR]);
-    
-    console.log(`✅ Airdrop sent: https://solscan.io/tx/${sig}`);
 
-    // === Log in Supabase ===
-    const { error: dbError } = await supabase.from("presale_logs").insert([
-      {
-        buyer,
-        sol_amount: amount,
-        abc_amount: abcToSend / 10 ** TOKEN_DECIMALS,
-        tx_signature: txSignature || sig
-      }
-    ]);
-    if (dbError) console.error("⚠️ Failed to log in Supabase:", dbError.message);
-    else console.log("🧾 Sale logged successfully.");
+    // === Send ===
+    const sig = await connection.sendTransaction(tx, [AIRDROP_KEYPAIR]);
+    console.log(`✅ Airdrop sent: https://solscan.io/tx/${sig}`);
 
     return res.status(200).json({ success: true, tx: sig });
   } catch (err) {
