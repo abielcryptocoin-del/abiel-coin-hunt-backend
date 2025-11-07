@@ -6,7 +6,7 @@ import {
 } from "@solana/spl-token";
 import { createClient } from "@supabase/supabase-js";
 
-console.log("🚀 airdrop-handler — stable + Supabase logging");
+console.log("🚀 airdrop-handler — dynamic SOL→USD rate + Supabase logging");
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
@@ -28,8 +28,25 @@ const secret = JSON.parse(process.env.AIRDROP_SECRET_KEY);
 const AIRDROP_KEYPAIR = Keypair.fromSecretKey(Uint8Array.from(secret));
 
 // === SETTINGS ===
-const ABC_RATE = 700; // 1 USDC = 700 ABC
+const ABC_RATE_USDC = 700; // 1 USDC = 700 ABC
 const TOKEN_DECIMALS = 6;
+
+// === Helper: get current SOL→USD price ===
+async function getSolPriceUSD() {
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+      { cache: "no-store" }
+    );
+    const data = await res.json();
+    const price = data.solana?.usd || 0;
+    console.log(`💲 Current SOL/USD price: ${price}`);
+    return price > 0 ? price : 150; // fallback to $150 if CoinGecko fails
+  } catch (e) {
+    console.error("⚠️ Failed to fetch SOL price, using fallback 150:", e);
+    return 150;
+  }
+}
 
 // === MAIN HANDLER ===
 export default async function handler(req, res) {
@@ -45,6 +62,7 @@ export default async function handler(req, res) {
 
     let buyer = null;
     let amount = 0;
+    let abcToSend = 0;
 
     // === Detect SOL payment ===
     const solTx = nativeTransfers.find(
@@ -53,6 +71,13 @@ export default async function handler(req, res) {
     if (solTx) {
       buyer = solTx.fromUserAccount;
       amount = solTx.amount / 1e9; // lamports → SOL
+
+      // Convert to USD and calculate ABC
+      const solPriceUSD = await getSolPriceUSD();
+      const usdValue = amount * solPriceUSD;
+      abcToSend = Math.floor(usdValue * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
+
+      console.log(`💵 ${amount} SOL ≈ ${usdValue.toFixed(2)} USD → ${abcToSend / 10 ** TOKEN_DECIMALS} ABC`);
     }
 
     // === Detect USDC payment ===
@@ -62,6 +87,7 @@ export default async function handler(req, res) {
     if (usdcTx) {
       buyer = usdcTx.fromUserAccount;
       amount = usdcTx.tokenAmount / 1e6; // USDC decimals
+      abcToSend = Math.floor(amount * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
     }
 
     if (!buyer || amount <= 0) {
@@ -70,9 +96,6 @@ export default async function handler(req, res) {
     }
 
     console.log(`💰 Buyer ${buyer} paid ${amount} (SOL/USDC)`);
-
-    // === Calculate ABC to send ===
-    const abcToSend = Math.floor(amount * ABC_RATE * 10 ** TOKEN_DECIMALS);
     console.log(`🎁 Sending ${abcToSend / 10 ** TOKEN_DECIMALS} ABC`);
 
     // === Prepare transfer ===
