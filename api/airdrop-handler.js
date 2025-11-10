@@ -5,7 +5,8 @@ import {
   getAccount,
   createAssociatedTokenAccountInstruction,
   createTransferInstruction,
-} from "@solana/spl-token";import { createClient } from "@supabase/supabase-js";
+} from "@solana/spl-token";
+import { createClient } from "@supabase/supabase-js";
 
 console.log("🚀 airdrop-handler — dynamic SOL→USD rate + Supabase logging");
 
@@ -128,8 +129,8 @@ export default async function handler(req, res) {
     );
     if (usdcTx) {
       buyer = usdcTx.fromUserAccount;
-      amount = usdcTx.tokenAmount / 1e6; // USDC decimals
-
+      amount = Number(usdcTx.tokenAmount) / 1e6; // robust if tokenAmount is a string
+      
       abcToSend = Math.floor(amount * RATE_ABC_PER_USDC * 10 ** TOKEN_DECIMALS);      
     }
 
@@ -147,6 +148,18 @@ export default async function handler(req, res) {
     const toATA = await getAssociatedTokenAddress(ABC_MINT, buyerPubkey);
 
     const tx = new Transaction();
+
+    try {
+      await getAccount(connection, fromATA);
+    } catch {
+      tx.add(createAssociatedTokenAccountInstruction(
+        AIRDROP_SOURCE_WALLET,
+        fromATA,
+        AIRDROP_SOURCE_WALLET,
+        ABC_MINT
+      ));
+    }
+    
     try {
       // If this throws, the buyer's ABC ATA doesn't exist yet
       await getAccount(connection, toATA);
@@ -170,16 +183,20 @@ export default async function handler(req, res) {
     console.log(`✅ Airdrop sent: https://solscan.io/tx/${sig}`);
 
     // === Log to Supabase ===
+    const isSOL = Boolean(solTx);
     const { error } = await supabase.from("presale_logs").insert([
       {
         buyer,
-        sol_amount: amount,
+        sol_amount: isSOL ? amount : null,
+        usdc_amount: !isSOL ? amount : null,
         abc_amount: abcToSend / 10 ** TOKEN_DECIMALS,
+        used_rate: RATE_ABC_PER_USDC,
+        at_time_iso: when.toISOString(),
         tx_signature: event.signature || sig,
         created_at: new Date().toISOString(),
       },
     ]);
-
+    
     if (error) console.error("⚠️ Supabase insert error:", error.message);
     else console.log("🧾 Sale logged successfully to Supabase.");
 
