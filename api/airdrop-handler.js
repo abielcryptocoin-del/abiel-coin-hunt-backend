@@ -2,9 +2,10 @@
 import { Connection, PublicKey, Transaction, Keypair } from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
+  getAccount,
+  createAssociatedTokenAccountInstruction,
   createTransferInstruction,
-} from "@solana/spl-token";
-import { createClient } from "@supabase/supabase-js";
+} from "@solana/spl-token";import { createClient } from "@supabase/supabase-js";
 
 console.log("🚀 airdrop-handler — dynamic SOL→USD rate + Supabase logging");
 
@@ -28,8 +29,40 @@ const secret = JSON.parse(process.env.AIRDROP_SECRET_KEY);
 const AIRDROP_KEYPAIR = Keypair.fromSecretKey(Uint8Array.from(secret));
 
 // === SETTINGS ===
-const ABC_RATE_USDC = 700; // 1 USDC = 700 ABC
-const TOKEN_DECIMALS = 6;
+// ABC token decimals (set to your mint's actual decimals)
+const TOKEN_DECIMALS = 6; // if ABC mint uses 9, change this to 9
+
+// Presale schedule (UTC, inclusive end times) — NEW 2-day 750 window then 700, etc.
+const PHASES = [
+  { start: "2025-11-08T00:00:00Z", end: "2025-11-10T23:59:59.999Z", rate: 750 }, // 08.11 → 10.11
+  { start: "2025-11-11T00:00:00Z", end: "2025-11-27T23:59:59.999Z", rate: 700 }, // 11.11 → 28.11
+  { start: "2025-11-28T00:00:00Z", end: "2025-12-04T23:59:59.999Z", rate: 650 }, // 28.11 → 05.12
+  { start: "2025-12-05T00:00:00Z", end: "2025-12-11T23:59:59.999Z", rate: 600 }, // 05.12 → 12.12
+  { start: "2025-12-12T00:00:00Z", end: "2025-12-18T23:59:59.999Z", rate: 550 }, // 12.12 → 19.12
+  { start: "2025-12-19T00:00:00Z", end: "2025-12-25T23:59:59.999Z", rate: 500 }, // 19.12 → 26.12
+  { start: "2025-12-26T00:00:00Z", end: "2026-01-01T23:59:59.999Z", rate: 450 }, // 26.12 → 02.01
+  { start: "2026-01-02T00:00:00Z", end: "2026-01-08T23:59:59.999Z", rate: 400 }, // 02.01 → 09.01
+  { start: "2026-01-09T00:00:00Z", end: "2026-01-15T23:59:59.999Z", rate: 350 }, // 09.01 → 16.01
+  { start: "2026-01-16T00:00:00Z", end: "2026-01-22T23:59:59.999Z", rate: 300 }, // 16.01 → 23.01
+  { start: "2026-01-23T00:00:00Z", end: "2026-01-29T23:59:59.999Z", rate: 250 }, // 23.01 → 30.01
+  { start: "2026-01-30T00:00:00Z", end: "2026-02-05T23:59:59.999Z", rate: 200 }, // 30.01 → 06.02
+  { start: "2026-02-06T00:00:00Z", end: "2026-02-13T23:59:59.999Z", rate: 150 }, // 06.02 → 14.02
+];
+const LAUNCH_DATE = "2026-02-14T00:00:00Z";
+const LAUNCH_RATE = 75;
+
+// Helper: select the phase rate for a given time (inclusive ends)
+function getRateAt(isoOrDate) {
+  const t = new Date(isoOrDate);
+  if (t >= new Date(LAUNCH_DATE)) return LAUNCH_RATE;
+  for (const p of PHASES) {
+    const s = new Date(p.start), e = new Date(p.end);
+    if (t >= s && t <= e) return p.rate;
+  }
+  // Before schedule starts → first rate; after last phase but pre-launch → last phase rate
+  if (t < new Date(PHASES[0].start)) return PHASES[0].rate;
+  return PHASES[PHASES.length - 1].rate;
+}
 
 // === Helper: get current SOL→USD price ===
 async function getSolPriceUSD() {
@@ -57,6 +90,15 @@ export default async function handler(req, res) {
     console.log("🎯 Webhook event received:", JSON.stringify(req.body, null, 2));
     const event = req.body[0];
 
+    // Derive an authoritative timestamp from the webhook for phase selection
+    const txMs =
+      (typeof event?.timestamp === "number" ? (event.timestamp < 1e12 ? event.timestamp * 1000 : event.timestamp) : null) ??
+      (typeof event?.blockTime === "number" ? (event.blockTime * 1000) : null) ??
+      Date.now();
+    const when = new Date(txMs);
+    const RATE_ABC_PER_USDC = getRateAt(when);
+    console.log(`🕒 Using ${RATE_ABC_PER_USDC} ABC/USDC for time ${when.toISOString()}`);
+
     const nativeTransfers = event.nativeTransfers || [];
     const tokenTransfers = event.tokenTransfers || [];
 
@@ -75,7 +117,7 @@ export default async function handler(req, res) {
       // Convert to USD and calculate ABC
       const solPriceUSD = await getSolPriceUSD();
       const usdValue = amount * solPriceUSD;
-      abcToSend = Math.floor(usdValue * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
+      abcToSend = Math.floor(usdValue * RATE_ABC_PER_USDC * 10 ** TOKEN_DECIMALS);
 
       console.log(`💵 ${amount} SOL ≈ ${usdValue.toFixed(2)} USD → ${abcToSend / 10 ** TOKEN_DECIMALS} ABC`);
     }
@@ -87,7 +129,8 @@ export default async function handler(req, res) {
     if (usdcTx) {
       buyer = usdcTx.fromUserAccount;
       amount = usdcTx.tokenAmount / 1e6; // USDC decimals
-      abcToSend = Math.floor(amount * ABC_RATE_USDC * 10 ** TOKEN_DECIMALS);
+
+      abcToSend = Math.floor(amount * RATE_ABC_PER_USDC * 10 ** TOKEN_DECIMALS);      
     }
 
     if (!buyer || amount <= 0) {
@@ -103,8 +146,22 @@ export default async function handler(req, res) {
     const fromATA = await getAssociatedTokenAddress(ABC_MINT, AIRDROP_SOURCE_WALLET);
     const toATA = await getAssociatedTokenAddress(ABC_MINT, buyerPubkey);
 
-    const ix = createTransferInstruction(fromATA, toATA, AIRDROP_SOURCE_WALLET, abcToSend);
-    const tx = new Transaction().add(ix);
+    const tx = new Transaction();
+    try {
+      // If this throws, the buyer's ABC ATA doesn't exist yet
+      await getAccount(connection, toATA);
+    } catch {
+      // Create buyer's ATA (payer = AIRDROP_SOURCE_WALLET)
+      tx.add(createAssociatedTokenAccountInstruction(
+        AIRDROP_SOURCE_WALLET, // payer covering rent
+        toATA,                 // ATA to create
+        buyerPubkey,           // ATA owner
+        ABC_MINT               // mint
+      ));
+    }
+    // Now safe to transfer ABC
+    tx.add(createTransferInstruction(fromATA, toATA, AIRDROP_SOURCE_WALLET, abcToSend));
+    
     tx.feePayer = AIRDROP_SOURCE_WALLET;
     tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
 
