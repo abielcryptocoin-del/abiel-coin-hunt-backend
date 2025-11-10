@@ -183,20 +183,27 @@ export default async function handler(req, res) {
     const sig = await connection.sendTransaction(tx, [AIRDROP_KEYPAIR]);
     console.log(`✅ Airdrop sent: https://solscan.io/tx/${sig}`);
 
-    // === Log to Supabase ===
     const isSOL = Boolean(solTx);
-    const { error } = await supabase.from("presale_logs").insert([
-      {
-        buyer,
-        sol_amount: isSOL ? amount : null,
-        usdc_amount: !isSOL ? amount : null,
-        abc_amount: abcToSend / 10 ** TOKEN_DECIMALS,
-        used_rate: RATE_ABC_PER_USDC,
-        at_time_iso: when.toISOString(),
-        tx_signature: event.signature || sig,
-        created_at: new Date().toISOString(),
-      },
-    ]);
+    const mode = isSOL ? "SOL" : "USDC";
+    
+    // If you want, keep usdValue from SOL path for logging
+    // For USDC path, price_sol_usd should be null.
+    const priceSolUsd = isSOL ? Number(usdValue / amount) : null;
+    
+    // Insert row matching your schema (names & types)
+    const { error } = await supabase.from("presale_logs").insert([{
+      buyer,
+      sol_amount:   isSOL ? amount : null,                         // numeric
+      usdc_amount: !isSOL ? amount : null,                         // numeric
+      abc_amount:   abcToSend / 10 ** TOKEN_DECIMALS,              // numeric (human ABC)
+      abc_base_unit: abcToSend,                                    // int8 (base units)
+      used_rate:    RATE_ABC_PER_USDC,                             // int4
+      at_time_iso:  when.toISOString(),                            // timestamp
+      price_sol_usd: priceSolUsd,                                  // numeric or null
+      mode,                                                        // text ('SOL'|'USDC')
+      tx_signature: event.signature || sig,                        // text
+      created_at:   new Date().toISOString(),                      // timestamp (you also have default NOW())
+    }]);
     
     if (error) console.error("⚠️ Supabase insert error:", error.message);
     else console.log("🧾 Sale logged successfully to Supabase.");
