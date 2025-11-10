@@ -89,7 +89,8 @@ export default async function handler(req, res) {
 
   try {
     console.log("🎯 Webhook event received:", JSON.stringify(req.body, null, 2));
-    const event = req.body[0];
+    const body = req.body;
+    const event = Array.isArray(body) ? body[0] : body;    
 
     // Derive an authoritative timestamp from the webhook for phase selection
     const txMs =
