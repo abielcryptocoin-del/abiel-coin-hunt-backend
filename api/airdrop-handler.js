@@ -186,29 +186,56 @@ export default async function handler(req, res) {
     const isSOL = Boolean(solTx);
     const mode = isSOL ? "SOL" : "USDC";
     
-    // If you want, keep usdValue from SOL path for logging
-    // For USDC path, price_sol_usd should be null.
-    const priceSolUsd = isSOL ? Number(usdValue / amount) : null;
+    // Calculate usdValue safely for both cases
+    let usdValue = null;
+    let priceSolUsd = null;
+    if (isSOL) {
+      const solPriceUSD = await getSolPriceUSD();
+      usdValue = amount * solPriceUSD;
+      priceSolUsd = solPriceUSD;
+    } else {
+      usdValue = amount; // 1 USDC = 1 USD
+      priceSolUsd = null;
+    }
     
-    // Insert row matching your schema (names & types)
-    const { error } = await supabase.from("presale_logs").insert([{
-      buyer,
-      sol_amount:   isSOL ? amount : null,                         // numeric
-      usdc_amount: !isSOL ? amount : null,                         // numeric
-      abc_amount:   abcToSend / 10 ** TOKEN_DECIMALS,              // numeric (human ABC)
-      abc_base_unit: abcToSend,                                    // int8 (base units)
-      used_rate:    RATE_ABC_PER_USDC,                             // int4
-      at_time_iso:  when.toISOString(),                            // timestamp
-      price_sol_usd: priceSolUsd,                                  // numeric or null
-      mode,                                                        // text ('SOL'|'USDC')
-      tx_signature: event.signature || sig,                        // text
-      created_at:   new Date().toISOString(),                      // timestamp (you also have default NOW())
-    }]);
+    // === Duplicate protection ===
+    const { data: existing } = await supabase
+      .from("presale_logs")
+      .select("tx_signature")
+      .eq("tx_signature", event.signature || sig)
+      .maybeSingle();
     
-    if (error) console.error("⚠️ Supabase insert error:", error.message);
-    else console.log("🧾 Sale logged successfully to Supabase.");
-
+    if (existing) {
+      console.log("⚠️ Duplicate transaction detected, skipping log/airdrop:", event.signature || sig);
+      return res.status(200).json({ duplicate: true });
+    }
+    
+    // === Log to Supabase ===
+    try {
+      const { error } = await supabase.from("presale_logs").insert([{
+        buyer,
+        sol_amount:   isSOL ? amount : null,
+        usdc_amount: !isSOL ? amount : null,
+        abc_amount:   abcToSend / 10 ** TOKEN_DECIMALS,
+        abc_base_unit: abcToSend,
+        usd_value: usdValue,
+        used_rate:    RATE_ABC_PER_USDC,
+        at_time_iso:  when.toISOString(),
+        price_sol_usd: priceSolUsd,
+        mode,
+        tx_signature: event.signature || sig,
+        created_at:   new Date().toISOString(),
+      }]);
+    
+      if (error) console.error("⚠️ Supabase insert error:", error.message);
+      else console.log("🧾 Sale logged successfully to Supabase.");
+    } catch (logErr) {
+      console.error("⚠️ Logging failed (non-fatal):", logErr);
+    }
+    
+    // Always return 200 so Helius won’t retry
     return res.status(200).json({ success: true, tx: sig });
+
   } catch (err) {
     console.error("❌ Airdrop error:", err);
     return res.status(500).json({ error: err.message });
