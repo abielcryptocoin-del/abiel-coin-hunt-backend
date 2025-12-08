@@ -24,11 +24,11 @@ export default async function handler(req, res) {
   try {
     const { data, error } = await supabase
       .from("arcade_scores")
-      .select("initials, score, ts")
+      .select("initials, score, created_at")
       .eq("game", game)
       .not("initials", "is", null)
       .order("score", { ascending: false })
-      .order("ts", { ascending: true })  // tie-breaker: older first
+      .order("created_at", { ascending: true })  // tie-breaker: older first
       .limit(10);
 
     if (error) {
