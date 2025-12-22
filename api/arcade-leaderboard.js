@@ -7,7 +7,7 @@ const supabase = createClient(
 );
 
 export default async function handler(req, res) {
-  // CORS for your frontend
+  // CORS for your frontend(s)
   res.setHeader("Access-Control-Allow-Origin", "https://abielcryptocoin.com");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -24,11 +24,12 @@ export default async function handler(req, res) {
   try {
     const { data, error } = await supabase
       .from("arcade_scores")
-      .select("initials, score, created_at")
+      // ✅ add wallet
+      .select("initials, score, wallet, created_at")
       .eq("game", game)
       .not("initials", "is", null)
       .order("score", { ascending: false })
-      .order("created_at", { ascending: true })  // tie-breaker: older first
+      .order("created_at", { ascending: true }) // tie-breaker: older first
       .limit(10);
 
     if (error) {
@@ -45,3 +46,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server error" });
   }
 }
+
