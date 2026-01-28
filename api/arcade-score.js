@@ -5,6 +5,19 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// ISO week id like "2026-W05" (UTC-based to avoid timezone edge cases)
+function getISOWeekId(date = new Date()) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;          // Mon=1..Sun=7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);  // nearest Thursday
+  const isoYear = d.getUTCFullYear();
+
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+
+  return `${isoYear}-W${String(weekNo).padStart(2, "0")}`;
+}
+
 export default async function handler(req, res) {
   // --- CORS ---
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -32,10 +45,12 @@ export default async function handler(req, res) {
     let initialsClean = null;
     if (typeof initials === "string") {
       initialsClean = initials.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 3);
-      if (initialsClean.length === 0) {
-        initialsClean = null;
-      }
+      if (initialsClean.length === 0) initialsClean = null;
     }
+
+    // Respect provided ts for created_at, but compute week_id from that same moment
+    const createdAt = ts || new Date().toISOString();
+    const week_id = getISOWeekId(new Date(createdAt));
 
     const { error } = await supabase
       .from("arcade_scores")
@@ -45,8 +60,8 @@ export default async function handler(req, res) {
         score,
         level: level ?? null,
         initials: initialsClean,
-        // keep using created_at if that column already exists
-        created_at: ts || new Date().toISOString()
+        created_at: createdAt,
+        week_id
       });
 
     if (error) {
@@ -54,7 +69,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Supabase insert failed" });
     }
 
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true, week_id });
   } catch (err) {
     console.error("Handler error:", err);
     return res.status(500).json({ error: "Unexpected error" });
